@@ -43,6 +43,9 @@ const logger = winston.createLogger({
   ]
 });
 
+
+
+// =======CONSOLE LOG========
 // Add console logging in development
 if (process.env.NODE_ENV !== 'production') {
   logger.add(new winston.transports.Console({
