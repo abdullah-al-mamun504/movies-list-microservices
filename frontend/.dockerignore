@@ -1,0 +1,25 @@
+# Ignore node_modules if any
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Ignore git files
+.git
+.gitignore
+
+# Ignore any environment config or sensitive files
+.env
+
+# Ignore logs and temp files
+*.log
+tmp/
+temp/
+
+# Ignore Dockerfiles or configs that aren't needed inside image
+Dockerfile
+.dockerignore
+
+# Ignore any other source or dev files not needed in the image
+*.md
+*.sh
+

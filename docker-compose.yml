@@ -1,0 +1,76 @@
+version: '3.9'
+
+services:
+  redis:
+    build: ./redis
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  users-db:
+    build: ./users-db
+    container_name: users-db
+    environment:
+      POSTGRES_DB: ${USERS_DB_NAME}
+      POSTGRES_USER: ${USERS_DB_USER}
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD}
+    ports:
+      - "${USERS_DB_PORT}:5432"
+    volumes:
+      - /home/himel/movie-list-ms/user_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  movies-db:
+    build: ./movies-db
+    container_name: movies-db
+    environment:
+      POSTGRES_DB: ${MOVIES_DB_NAME}
+      POSTGRES_USER: ${MOVIES_DB_USER}
+      POSTGRES_PASSWORD: ${MOVIES_DB_PASSWORD}
+    ports:
+      - "${MOVIES_DB_PORT}:5432"  # Host port 5433 → container port 5432
+    volumes:
+      - /home/himel/movie-list-ms/movie_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  backend:
+    build: ./backend
+    container_name: backend
+    depends_on:
+      - redis
+      - users-db
+      - movies-db
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - /home/himel/movie-list-ms/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
