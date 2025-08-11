@@ -1,74 +1,309 @@
+
+# ---------------------------------------------------------------------
+# Docker Compose for movie-list-ms (cloud-friendly, bind-mounted volumes)
+# ---------------------------------------------------------------------
+#
+# - Volumes are defined at the bottom and map to host paths under
+#   /app/data/docker/* using the local driver with `device` + `o: bind`.
+# - At container start we run a small entrypoint shell to detect the
+#   runtime UID/GID for the target service user and chown the mounted
+#   directory so the container process can write to it without manual chown.
+#
+# -  This /app/data/docker can be changed on your enviroment
+#
+#
+# NOTES:
+# - `deploy` blocks are allowed here to capture resource intent (useful
+#   for Swarm/Kubernetes translations). docker-compose (local) ignores them,
+#   but they don't hurt.
+# - If the host path (/app/data/docker/...) does not exist, Docker will
+#   attempt to create it, but it's safer to create it manually beforehand.
+#--------------------------------------------------------------------------
+
+
+
 services:
+  # ------------------------
+  # Redis service
+  # ------------------------
+
   redis:
     build: ./redis
+    image: movie-list-ms-redis:latest
     container_name: redis
+    hostname: redis
     ports:
       - "6379:6379"
     volumes:
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     restart: unless-stopped
+    labels:
+      - "com.movie-list-ms.service=redis"
     networks:
       - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # ------------------------
+  # Users (Postgres)
+  # ------------------------
   users-db:
     build: ./users-db
+    image: movie-list-ms-users-db:latest
     container_name: users-db
+    hostname: users-db
+
+  # These come from your .env file (env_file at backend). Keep .env as-is.
     environment:
       POSTGRES_DB: ${USERS_DB_NAME}
       POSTGRES_USER: ${USERS_DB_USER}
       POSTGRES_PASSWORD: ${USERS_DB_PASSWORD}
+
+  # Expose host port configured in .env (host_port:container_port)
     ports:
       - "${USERS_DB_PORT}:5432"
+  
+  # Named volume mapped to a host path (see volumes: below)
     volumes:
-      - /home/himel/movie-list-ms/user_data:/var/lib/postgresql/data
+      - users_db_data:/var/lib/postgresql/data
+
+  # Run as root for the entrypoint snippet (we will exec docker-entrypoint.sh later,
+  # which will run postgres properly as the 'postgres' user). The inline entrypoint:
+  #  - ensures directory exists inside container,
+  #  - finds the container 'postgres' UID/GID if present,
+  #  - chowns the data directory accordingly,
+  #  - execs the official entrypoint to continue normal postgres startup.
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - |
+        # Create data dir, detect postgres UID/GID if present, chown and exec official entrypoint.
+        mkdir -p /var/lib/postgresql/data
+        if id postgres >/dev/null 2>&1; then
+          CHOWN_UID=$(id -u postgres)
+          CHOWN_GID=$(id -g postgres)
+        else
+          # fallback UID:GID (commonly 999:999 in some postgres images) if user not found
+          CHOWN_UID=999
+          CHOWN_GID=999
+        fi
+        chown -R ${CHOWN_UID}:${CHOWN_GID} /var/lib/postgresql/data
+        exec docker-entrypoint.sh postgres
     restart: unless-stopped
+    labels:
+      - "com.movie-list-ms.service=users-db"
     networks:
       - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "1G"
+        reservations:
+          cpus: "0.5"
+          memory: "512M"
 
+  # ------------------------
+  # Movies (Postgres)
+  # ------------------------
   movies-db:
     build: ./movies-db
+    image: movie-list-ms-movies-db:latest
     container_name: movies-db
+    hostname: movies-db
     environment:
       POSTGRES_DB: ${MOVIES_DB_NAME}
       POSTGRES_USER: ${MOVIES_DB_USER}
       POSTGRES_PASSWORD: ${MOVIES_DB_PASSWORD}
+
+  # (host_port:container_port)
     ports:
-      - "${MOVIES_DB_PORT}:5432"  # Host port 5433 → container port 5432
+      - "${MOVIES_DB_PORT}:5432"
+
     volumes:
-      - /home/himel/movie-list-ms/movie_data:/var/lib/postgresql/data
+      - movies_db_data:/var/lib/postgresql/data
+
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /var/lib/postgresql/data
+        if id postgres >/dev/null 2>&1; then
+          CHOWN_UID=$(id -u postgres)
+          CHOWN_GID=$(id -g postgres)
+        else
+          CHOWN_UID=999
+          CHOWN_GID=999
+        fi
+        chown -R ${CHOWN_UID}:${CHOWN_GID} /var/lib/postgresql/data
+        exec docker-entrypoint.sh postgres
     restart: unless-stopped
+    labels:
+      - "com.movie-list-ms.service=movies-db"
     networks:
       - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "1G"
+        reservations:
+          cpus: "0.5"
+          memory: "512M"
 
+  # ------------------------
+  # Backend (Node)
+  # ------------------------
   backend:
     build: ./backend
+    image: movie-list-ms-backend:latest
     container_name: backend
+    hostname: backend
     depends_on:
       - redis
       - users-db
       - movies-db
+  
+  # This .env file is in the backend directory
     env_file:
       - .env
+
+  # (host_port:container_port)
     ports:
       - "3000:3000"
+
+  # mounts host:/app/data/docker/backend_logs -> container:/app/logs
+  # Run entrypoint as root so we can fix host-mounted directory ownership.
+  # After fixing ownership we drop privileges using su-exec (installed inside backend image)
+  # and exec the node process as the container node user.
+  
     volumes:
-      - /home/himel/movie-list-ms/logs:/app/logs
+      - backend_logs:/app/logs
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - |
+        # create logs dir and set ownership to the node user available inside the image.
+        mkdir -p /app/logs
+        if id node >/dev/null 2>&1; then
+          CHOWN_UID=$(id -u node)
+          CHOWN_GID=$(id -g node)
+        elif id nodejs >/dev/null 2>&1; then
+          CHOWN_UID=$(id -u nodejs)
+          CHOWN_GID=$(id -g nodejs)
+        else
+          # fallback UID/GID
+          CHOWN_UID=1000
+          CHOWN_GID=1000
+        fi
+        chown -R ${CHOWN_UID}:${CHOWN_GID} /app/logs 2>/dev/null || chown -R ${CHOWN_UID} /app/logs
+        # drop privileges to node user and start the server (su-exec is installed in backend image)
+        exec su-exec $(id -un ${CHOWN_UID} 2>/dev/null || echo node) node src/server.js
     restart: unless-stopped
+    labels:
+      - "com.movie-list-ms.service=backend"
     networks:
       - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "512M"
+        reservations:
+          cpus: "0.5"
+          memory: "256M"
 
+  # ------------------------
+  # Frontend (nginx)
+  # ------------------------
   frontend:
     build: ./frontend
+    image: movie-list-ms-frontend:latest
     container_name: frontend
+    hostname: frontend
     depends_on:
       - backend
     ports:
       - "8080:80"
     restart: unless-stopped
+    labels:
+      - "com.movie-list-ms.service=frontend"
     networks:
       - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: "256M"
+        reservations:
+          cpus: "0.25"
+          memory: "128M"
+
+# ------------------------
+# Named volumes -> host bind mounts
+# ------------------------
+volumes:
+
+
+# using 'local' driver with device + o:bind ensures data ends up in
+# /app/data/docker/<name> on the host (you requested this pattern).
+# Command :  ## docker volume inspect movie-list-ms_backend_logs | egrep "Mountpoint|device"
+
+
+  users_db_data:
+    driver: local
+    driver_opts:  
+      type: none
+      device: /app/data/docker/users_db
+      o: bind
+  movies_db_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /app/data/docker/movies_db
+      o: bind
+  backend_logs:
+    driver: local
+    driver_opts:
+      type: none
+      device: /app/data/docker/backend_logs
+      o: bind
+
+# ------------------------
+# Network
+# ------------------------
+
+# command to check  ##  docker network inspect movie-list-ms_app-network | egrep -i "name|IPv4Address"
 
 networks:
   app-network:
     driver: bridge
-
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
